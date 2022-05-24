@@ -19,6 +19,9 @@ def config_parser():
                         help='image path')
     parser.add_argument('--expname', type = str, 
                         help='expname path')
+    parser.add_argument('--spherify', action = "store_true", default = True,
+                        help='pictures are shoted inwarding 360 degrees')
+
 
     parser.add_argument('--render_only', action = "store_true", 
                         help='only render with ckpt')
@@ -63,7 +66,7 @@ def poses2rays(render_poses, args):
     render_poses = render_poses[:, :, :4] # N,3,4 去除hwf
     bottom = torch.tile(torch.tensor([[0,0,0,1]]), (render_poses.shape[0],1,1))
     p44 = torch.cat((render_poses, bottom), axis = -2) # N,4,4
-
+    
     hi, wi = torch.meshgrid(torch.linspace(0,H-1,H), torch.linspace(0,W-1,W), indexing = 'ij')
     d = torch.stack([(wi-W//2)/f,(hi-H//2)/f, -torch.ones(wi.shape)], axis = -1)
     d = torch.cat((d,torch.tensor([1]).expand(d.shape[0],d.shape[1],1) ), axis = -1).transpose(0,-1).reshape(-1,4,1)
@@ -96,7 +99,7 @@ def poses2rays_np(render_poses, args):
 
     p44 = p44.reshape(-1, 1, 4, 4)
     dir = p44 @ d
-    
+
     print(dir.shape)
     print(dir[0,0,:,0])
     return None
