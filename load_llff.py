@@ -16,7 +16,6 @@ def recenter(poses):
 
     p34 = np.stack([x_axis,y_axis,z_axis,xyz], axis = -1)
     p44 = np.concatenate([p34,[[0,0,0,1]] ], axis = -2)
-    print(p44)
     bottom = np.tile([[0,0,0,1]], (poses.shape[0],1,1))
     poses = np.concatenate((poses[:,:,:4], bottom), axis = -2) # N,4,4
 
@@ -41,14 +40,11 @@ def min_line_dist(rays_o, rays_d): # official version
 def load_llff(args):
     '''load pose bds imgs'''
     poses_bounds = np.load(os.path.join('./data', args.expname, 'poses_bounds.npy')) # N*17
-    print(poses_bounds.shape)
     poses = poses_bounds[:,:15].reshape([-1,3,5]) # N 3 5
     bds = poses_bounds[:, -2:] # N 2
 
     imgpath_root = os.path.join('./data', args.expname, args.image)
     imgpath = [os.path.join('./data', args.expname, args.image, f) for f in sorted(os.listdir(imgpath_root))]
-
-    print('img==pose: %r' % (len(imgpath) == poses.shape[0]))
 
     images = []
     for p in imgpath:
@@ -60,7 +56,6 @@ def load_llff(args):
     '''modify poses'''
     # 相机坐标系变换到openGL格式下,由[x down,y right,z backward]变换为[x right, y up, z backward], xyz和hwf不变
     poses = np.concatenate([poses[:, :, 1:2], -poses[:, :, 0:1], poses[:, :, 2:], ], axis = -1)
-    print(poses[0,:,:])
 
     # 这里需要hwf/2 因为目前没有实现改变图像分辨率,而现有的check_point是在分辨率减半的图像上训练出来,为了可以使用之前的check_point
     poses[:,:,4] = poses[:,:,4]/2
@@ -69,8 +64,14 @@ def load_llff(args):
     poses[:,:,3] = poses[...,3] / bd_factor
     bds = bds / bd_factor
 
+    # colmap生成的poses[i,:,:3]均为 orthonormal matrix
+    # for i in range(poses.shape[0]):
+    #     assert(np.abs((poses[i,:,:3].transpose((1,0)) @ poses[i,:,:3] - np.eye(3)).sum()) < 1e-10 )
+    #     for j in range(3):
+    #         # print(i,j,np.linalg.norm(poses[i,:,j]), 1.0)
+    #         assert(np.abs(np.linalg.norm(poses[i,:,j]) - 1.0 ) < 1e-10)
+
     poses = recenter(poses)
-    print(poses[0])
 
     # pt_mindist2 = min_line_dist2(poses[:, :, 2:3], poses[:, :, 3:4])
     # print(pt_mindist)
@@ -80,7 +81,6 @@ def load_llff(args):
         hwf = poses[:,:, 4:5]
     
         pt_mindist = min_line_dist(poses[:, :, 3:4], poses[:, :, 2:3])
-        print(pt_mindist)
         # 其实三个轴选择很随意 这里与原版数值保持一致
         z_axis = norm((poses[:,:,3] - pt_mindist).mean(0))
         x_axis = norm(np.cross([0.1,0.2,0.3], z_axis))
@@ -88,7 +88,6 @@ def load_llff(args):
 
         p34 = np.stack([x_axis,y_axis,z_axis,pt_mindist], axis = -1)
         p44 = np.concatenate([p34,[[0,0,0,1]] ], axis = -2)
-        print(p44)
         
         bottom = np.tile([[0,0,0,1]], (poses.shape[0],1,1))
         poses = np.concatenate((poses[:,:,:4], bottom), axis = -2) # N,4,4
@@ -101,6 +100,8 @@ def load_llff(args):
         # radius = np.mean(np.linalg.norm(poses[:,:,3], axis = -1), axis = 0)
         # radius = np.mean(np.sqrt(np.sum(np.square(poses[:,:3,3]), -1)))
         poses[:,:,3] *= 1/radius
+        bds *= 1/radius
+        radius = 1.0
 
 
     render_poses = poses
