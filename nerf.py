@@ -1,3 +1,6 @@
+from ast import arg
+from email.policy import default
+from operator import truediv
 import torch
 import configargparse
 import imageio
@@ -7,6 +10,8 @@ from load_llff import *
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 np.random.seed(0)
+
+start = 0
 
 def config_parser():
     parser = configargparse.ArgumentParser()
@@ -27,6 +32,10 @@ def config_parser():
 
     parser.add_argument('--render_only', action = "store_true",
                         help='only render with ckpt')
+    parser.add_argument('--render_train', action = "store_true", default = False,
+                        help='render_poses == train_poses with ckpt')
+    parser.add_argument('--render_test', action = "store_true", default = True,
+                        help='render_poses == test_poses with ckpt')
     parser.add_argument('--lrate', type = float, default = 5e-4,
                         help='learning rate')
     parser.add_argument('--lrate_decay', type = int, default = 250,
@@ -35,6 +44,8 @@ def config_parser():
                         help='number of coarse samples per ray')
     parser.add_argument('--N_importance',  type = int, default = 0,
                         help='number of additional fine samples per ray')
+    parser.add_argument('--batch_train',  type = int, default = 1024,
+                        help='batch size of rays while training')
     parser.add_argument('--batch_rays',  type = int, default = 1024*8,
                         help='batch size of rays')
     parser.add_argument('--batch_points',  type = int, default = 1024*16,
@@ -65,7 +76,7 @@ def create_nerf(args):
 
     optimizer = torch.optim.Adam(para, lr = args.lrate, betas = (0.9, 0.999), eps = 1e-7)
     
-    start = None
+    start = 0
     if args.ckpt != None: # load ckpt
         ckpt = torch.load(args.ckpt)
         print('load ckpt from: '+args.ckpt)
@@ -135,13 +146,14 @@ def raws2pixels(raws, points, args):
     points = points.reshape(-1, args.N_samples, 3+3)
     x,d = points[:,:,:3], points[:,0,3:6] # x[N*H*W,N_samples,3], d[N*H*W,3]
     rgb, sigma = raws[:,:,:3], raws[:,:,3] # rgb[N*H*W,N_samples,3], sigma[N*H*W,N_samples]
-    
+
     last_dist = 1e5
     dist = torch.cat([torch.linalg.norm(x[:,1:,:] - x[:,:-1,:], dim = -1),
         torch.tensor(last_dist).expand(x.shape[0],1)], dim = -1)
 
     alpha = torch.tensor(1) - torch.exp(-sigma * dist) # alpha[N_rays, N_samples]
-    T = torch.cumprod(torch.cat([torch.tensor(1).expand(alpha.shape[0],1), alpha[:,:-1]],dim = -1), dim = 1)
+    eps = 1e-10
+    T = torch.cumprod(torch.cat([torch.tensor(1).expand(alpha.shape[0],1), 1.-alpha[:,:-1]+eps],dim = -1), dim = 1)
     pixels = torch.sum(T[...,None] * alpha[...,None] * rgb, dim = -2)
     return pixels
 
@@ -163,6 +175,7 @@ def points2pixels(points, model, model_fine, args):
         assert(args.batch_points % args.N_samples == 0)
         pixels = raws2pixels(raws, points[i:end], args)
         pixels_list.append(pixels)
+        # print(i, points_encoded.shape[0])
     pixels = torch.cat(pixels_list, dim = 0)
     return pixels
 
@@ -172,7 +185,6 @@ def batch_rays(rays, bds, model, model_fine, args):
         far = bds.max()*1.0
 
         pixels_list = []
-        print(rays.shape[0])
         for i in range(0, rays.shape[0], args.batch_rays):
             print(i)
             if i + args.batch_rays > rays.shape[0]:
@@ -182,6 +194,7 @@ def batch_rays(rays, bds, model, model_fine, args):
             batch_points = rays2points(rays[i:end,...], near, far, bds, args) # batch_points[N*H*W,N_sample,6] (x+dir)
             pixels = points2pixels(batch_points, model, model_fine, args)
             pixels_list.append(pixels)
+            print("rays", i/196608., rays.shape[0])
 
         pixels = torch.cat(pixels_list, dim = 0)
         print(len(pixels_list))
@@ -199,17 +212,71 @@ def render_poses_fn(render_poses, bds, model, model_fine, args): # render_poses[
     imgs = pixels.reshape((render_poses.shape[0],H,W,3))
     return imgs
 
+def train(train_poses, train_images, bds, model, model_fine, optimizer, args):
+    rays = poses2rays(train_poses, args) # rays[N*H*W,3,2] (rays_o+rays_d)
+
+    train_images = np.array([f/255 for f in train_images]).reshape((-1,3,1))
+    print(train_images.shape)
+    train_images = torch.from_numpy(train_images).to(device).to(torch.float32)
+    print(train_images.shape)
+    rays_rgb = torch.cat([rays, train_images], axis = -1)
+    batch_i = 0
+    for step in range(start, 200000, 1):
+        print(step)
+        if(batch_i + args.batch_train <= rays_rgb.shape[0]):
+            chunk = rays_rgb[batch_i : batch_i + args.batch_train]
+            batch_i += args.batch_train
+        else:
+            rays_rgb = rays_rgb[torch.randperm(rays_rgb.shape[0])]
+            batch_i = arg.batch_train
+            chunk = rays_rgb[:batch_i]
+        ray, rgb = chunk[...,:2], chunk[...,2]
+        pixels = batch_rays(ray, bds, model, model_fine, args)
+        loss = torch.mean((pixels-torch.tensor(rgb).to(device))**2)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        new_lrate = args.lrate * (0.1 ** (step / (args.lrate_decay*1000)))
+        for p in optimizer.param_groups:
+            p['lr'] = new_lrate
+        
+        if step % 100 == 0 and step != 0:
+            path = "logs/" + args.expname + '/ckpt/' + str(step) + '.tar'
+            if model_fine != None:
+                model_fine_state = model_fine.state_dict()
+            else:
+                model_fine_state = None
+            torch.save({
+                'global_step' : step,
+                'optimizer_state_dict' : optimizer.state_dict(),
+                'network_fn_state_dict' : model.state_dict(),
+                'network_fine_state_dict' : model_fine_state
+            }, path
+            )
+            print('save ckpt to: '+path)
+        
+
 if __name__ =='__main__':
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
     args = config_parser()
     print(args)
     model, model_fine, optimizer, start = create_nerf(args)
-    poses, render_poses, images, bds = load_llff(args)
-    images = [f/255 for f in images]
+    poses, train_poses, render_poses, train_images, render_images, bds, i_test = load_llff(args)
     if args.render_only == True:
         with torch.no_grad():
-            render_imgs = render_poses_fn(render_poses[0:1,...], bds[0:1,...], model, model_fine, args)
-            rgb8 = (render_imgs * 255).cpu().numpy().astype(np.uint8)
-            print(rgb8.shape)
-            imageio.imwrite("./img0.png", rgb8[0])
-    # print(images[0])
+            render_images = [f/255 for f in render_images]
+            # for i in range(render_poses.shape[0]):
+            render_poses = render_poses[::20]
+            render_images = render_images[::20]
+            render_imgs = render_poses_fn(render_poses, bds, model, model_fine, args)
+            rgb8 = (255 * (render_imgs).cpu().numpy()).astype(np.uint8)
+            for i in range(render_imgs.shape[0]):
+                imageio.imwrite("./img_" +  str(i) + ".png", rgb8[i])
+                imageio.imwrite("./img_GT_" + str(i) + ".png", render_images[i])
+                mse = torch.mean((render_imgs[i]-torch.tensor(render_images[i]).to(device))**2)
+                psnr = -10. * torch.log(mse) / torch.log(torch.tensor([10.]))
+                print(i, psnr)
+    else:
+        train(train_poses, train_images, bds, model, model_fine, optimizer, args)

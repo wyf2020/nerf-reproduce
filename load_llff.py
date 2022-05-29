@@ -1,3 +1,4 @@
+from cgi import test
 from math import radians
 import numpy as np
 import os
@@ -52,7 +53,7 @@ def load_llff(args):
             images += [imageio.imread(p, ignoregamma = True)]
         else:
             images += [imageio.imread(p)]
-
+    images = np.stack(images, 0)
     '''modify poses'''
     # 相机坐标系变换到openGL格式下,由[x down,y right,z backward]变换为[x right, y up, z backward], xyz和hwf不变
     poses = np.concatenate([poses[:, :, 1:2], -poses[:, :, 0:1], poses[:, :, 2:], ], axis = -1)
@@ -103,7 +104,23 @@ def load_llff(args):
         bds *= 1/radius
         radius = 1.0
 
-
-    render_poses = poses
-
-    return poses, render_poses, images, bds
+    test_num = poses.shape[0]//8;
+    i_test = []
+    i_train = []
+    for i in range(poses.shape[0]):
+        if(i % test_num != 0):
+            i_train.append(i)
+        else:
+            i_test.append(i)
+    train_poses = np.array([poses[i] for i in i_train])
+    train_images = np.array([images[i] for i in i_train])
+    if args.render_test == True:
+        render_poses = np.array([poses[i] for i in i_test])
+        render_images = np.array([images[i] for i in i_test])
+    elif args.render_train == True:
+        render_poses = np.array([poses[i] for i in i_train])
+        render_images = np.array([images[i] for i in i_train])
+    else :
+        render_poses = poses
+        render_images = np.array(images)
+    return poses, train_poses, render_poses, train_images, render_images, bds, i_test
