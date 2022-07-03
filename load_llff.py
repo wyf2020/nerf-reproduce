@@ -1,5 +1,3 @@
-from cgi import test
-from math import radians
 import numpy as np
 import os
 import imageio
@@ -59,13 +57,13 @@ def load_llff(args):
     poses = np.concatenate([poses[:, :, 1:2], -poses[:, :, 0:1], poses[:, :, 2:], ], axis = -1)
 
     # 这里需要hwf/2 因为目前没有实现改变图像分辨率,而现有的check_point是在分辨率减半的图像上训练出来,为了可以使用之前的check_point
-    poses[:,:,4] = poses[:,:,4]/2
+    poses[:,:,4] = poses[:,:,4]/ args.down_factor
     
     bd_factor = 0.75 * bds.min()
     poses[:,:,3] = poses[...,3] / bd_factor
     bds = bds / bd_factor
 
-    # colmap生成的poses[i,:,:3]均为 orthonormal matrix
+    # 验证colmap生成的poses[i,:,:3]均为 orthonormal matrix
     # for i in range(poses.shape[0]):
     #     assert(np.abs((poses[i,:,:3].transpose((1,0)) @ poses[i,:,:3] - np.eye(3)).sum()) < 1e-10 )
     #     for j in range(3):
@@ -74,9 +72,6 @@ def load_llff(args):
 
     poses = recenter(poses)
 
-    # pt_mindist2 = min_line_dist2(poses[:, :, 2:3], poses[:, :, 3:4])
-    # print(pt_mindist)
-    # print(pt_mindist2)
     if args.spherify == True:
         
         hwf = poses[:,:, 4:5]
@@ -104,7 +99,11 @@ def load_llff(args):
         bds *= 1/radius
         radius = 1.0
 
-    test_num = poses.shape[0]//8;
+    else:
+        pass
+
+
+    test_num = poses.shape[0]//8
     i_test = []
     i_train = []
     for i in range(poses.shape[0]):
@@ -114,6 +113,8 @@ def load_llff(args):
             i_test.append(i)
     train_poses = np.array([poses[i] for i in i_train])
     train_images = np.array([images[i] for i in i_train])
+    print(i_train)
+    print(i_test)
     if args.render_test == True:
         render_poses = np.array([poses[i] for i in i_test])
         render_images = np.array([images[i] for i in i_test])
@@ -123,4 +124,4 @@ def load_llff(args):
     else :
         render_poses = poses
         render_images = np.array(images)
-    return poses, train_poses, render_poses, train_images, render_images, bds, i_test
+    return poses, train_poses, render_poses, train_images, render_images, bds, i_test,i_train
